@@ -1,0 +1,404 @@
+# 🧪 Testing Your API - Simple Guide
+
+Learn how to test all the endpoints without writing code!
+
+---
+
+## Method 1: Using Your Browser (Easiest)
+
+### Test Health Endpoint
+
+Just open your browser and go to:
+```
+http://localhost:8000/api/health
+```
+
+You should see:
+```json
+{
+  "status": "healthy",
+  "timestamp": "...",
+  "uptime": 123.45
+}
+```
+
+✅ **If you see this, your server is working!**
+
+---
+
+## Method 2: Using cURL (In Terminal)
+
+### 1. Test Health Check
+```bash
+curl http://localhost:8000/api/health
+```
+
+### 2. Get API Info
+```bash
+curl http://localhost:8000/
+```
+
+That's all you can do without authentication! For the rest, you need a token.
+
+---
+
+## Method 3: Using Postman (Best for Testing)
+
+### Setup Postman
+
+1. **Download Postman**: https://www.postman.com/downloads/
+2. **Install and open it**
+3. **Create a new Collection** called "Health Vault API"
+
+### Getting Your Auth Token
+
+**Option A: From Your Frontend (If Running)**
+1. Open browser DevTools (F12)
+2. Go to Application → Local Storage
+3. Find the Auth0 token
+4. Copy it
+
+**Option B: Using Auth0 Dashboard**
+1. Go to Auth0 Dashboard
+2. APIs → Your API → Test tab
+3. Copy the token
+
+### Test Endpoints in Postman
+
+#### 1. Create Patient Profile
+
+**Request:**
+- Method: `POST`
+- URL: `http://localhost:8000/api/patients`
+- Headers:
+  ```
+  Authorization: Bearer YOUR_TOKEN_HERE
+  Content-Type: application/json
+  ```
+- Body (raw JSON):
+  ```json
+  {
+    "email": "john.doe@example.com",
+    "firstName": "John",
+    "lastName": "Doe",
+    "dateOfBirth": "1990-01-15",
+    "gender": "Male",
+    "bloodType": "O+",
+    "phone": "+1234567890",
+    "address": "123 Main St, City, State",
+    "emergencyContact": "Jane Doe +0987654321"
+  }
+  ```
+
+**Expected Response (201 Created):**
+```json
+{
+  "message": "Profile created successfully",
+  "patient": {
+    "_id": "507f1f77bcf86cd799439011",
+    "email": "john.doe@example.com",
+    "firstName": "John",
+    ...
+  }
+}
+```
+
+#### 2. Get Your Profile
+
+**Request:**
+- Method: `GET`
+- URL: `http://localhost:8000/api/patients/me`
+- Headers:
+  ```
+  Authorization: Bearer YOUR_TOKEN_HERE
+  ```
+
+**Expected Response (200 OK):**
+```json
+{
+  "_id": "507f1f77bcf86cd799439011",
+  "email": "john.doe@example.com",
+  "firstName": "John",
+  "lastName": "Doe",
+  ...
+}
+```
+
+#### 3. Create Medical Record
+
+**Request:**
+- Method: `POST`
+- URL: `http://localhost:8000/api/medical-records`
+- Headers:
+  ```
+  Authorization: Bearer YOUR_TOKEN_HERE
+  Content-Type: application/json
+  ```
+- Body:
+  ```json
+  {
+    "patientId": "YOUR_PATIENT_ID_FROM_STEP_1",
+    "hospitalName": "General Hospital",
+    "doctorName": "Dr. Smith",
+    "visitDate": "2024-01-15T10:00:00Z",
+    "diagnosis": "Annual checkup - all normal",
+    "symptoms": "None",
+    "treatment": "Continue healthy lifestyle",
+    "notes": "Patient in good health"
+  }
+  ```
+
+#### 4. Get Medical Records
+
+**Request:**
+- Method: `GET`
+- URL: `http://localhost:8000/api/patients/YOUR_PATIENT_ID/medical-records`
+- Headers:
+  ```
+  Authorization: Bearer YOUR_TOKEN_HERE
+  ```
+
+#### 5. Create Prescription
+
+**Request:**
+- Method: `POST`
+- URL: `http://localhost:8000/api/prescriptions`
+- Body:
+  ```json
+  {
+    "patientId": "YOUR_PATIENT_ID",
+    "medicationName": "Ibuprofen",
+    "dosage": "200mg",
+    "frequency": "Twice daily",
+    "duration": "7 days",
+    "prescribedBy": "Dr. Smith",
+    "hospitalName": "General Hospital",
+    "prescribedDate": "2024-01-15T10:00:00Z",
+    "notes": "Take with food"
+  }
+  ```
+
+#### 6. Get Prescriptions
+
+**Request:**
+- Method: `GET`
+- URL: `http://localhost:8000/api/patients/YOUR_PATIENT_ID/prescriptions`
+- To get only active: `http://localhost:8000/api/patients/YOUR_PATIENT_ID/prescriptions?active=true`
+
+#### 7. Update Prescription Status
+
+**Request:**
+- Method: `PATCH`
+- URL: `http://localhost:8000/api/prescriptions/PRESCRIPTION_ID`
+- Body:
+  ```json
+  {
+    "isActive": false
+  }
+  ```
+
+#### 8. Create Test Result
+
+**Request:**
+- Method: `POST`
+- URL: `http://localhost:8000/api/test-results`
+- Body:
+  ```json
+  {
+    "patientId": "YOUR_PATIENT_ID",
+    "testName": "Blood Test",
+    "testType": "Complete Blood Count",
+    "testDate": "2024-01-15T10:00:00Z",
+    "result": "All values within normal range",
+    "hospitalName": "General Hospital",
+    "orderedBy": "Dr. Smith"
+  }
+  ```
+
+#### 9. Upload Test File
+
+**Request:**
+- Method: `POST`
+- URL: `http://localhost:8000/api/test-results/TEST_RESULT_ID/upload`
+- Headers:
+  ```
+  Authorization: Bearer YOUR_TOKEN_HERE
+  ```
+- Body: 
+  - Type: form-data
+  - Key: `file`
+  - Value: [Select a PDF file]
+
+#### 10. Get Audit Logs
+
+**Request:**
+- Method: `GET`
+- URL: `http://localhost:8000/api/audit-logs`
+- Optional: `?page=1&limit=20&action=CREATE`
+
+---
+
+## Common Responses
+
+### ✅ Success (200, 201)
+```json
+{
+  "message": "Success message",
+  "data": { ... }
+}
+```
+
+### ❌ Not Found (404)
+```json
+{
+  "error": "Not found",
+  "message": "Patient not found"
+}
+```
+
+### ❌ Unauthorized (401)
+```json
+{
+  "error": "Unauthorized",
+  "message": "No authorization header provided"
+}
+```
+
+### ❌ Validation Error (400)
+```json
+{
+  "error": "Validation failed",
+  "errors": [
+    {
+      "msg": "Invalid email",
+      "param": "email"
+    }
+  ]
+}
+```
+
+### ❌ Server Error (500)
+```json
+{
+  "error": "Internal server error",
+  "message": "Failed to create patient"
+}
+```
+
+---
+
+## Testing Checklist
+
+### Basic Tests
+- [ ] Server health check works
+- [ ] Can create patient profile
+- [ ] Can get patient profile
+- [ ] Authentication works (401 without token)
+
+### CRUD Operations
+- [ ] Can create medical record
+- [ ] Can read medical records
+- [ ] Can create prescription
+- [ ] Can read prescriptions
+- [ ] Can update prescription status
+- [ ] Can create test result
+- [ ] Can read test results
+
+### File Upload (if S3 configured)
+- [ ] Can upload PDF file
+- [ ] Can upload image file
+- [ ] Rejects invalid file types
+- [ ] Rejects files over 10MB
+
+### Security
+- [ ] Cannot access without token
+- [ ] Token expiration works
+- [ ] Audit logs are created
+- [ ] Rate limiting works (try 100+ requests)
+
+---
+
+## Sample Test Data
+
+### Patient 1
+```json
+{
+  "email": "alice@example.com",
+  "firstName": "Alice",
+  "lastName": "Johnson",
+  "dateOfBirth": "1985-05-20",
+  "gender": "Female",
+  "bloodType": "A+",
+  "phone": "+1234567890"
+}
+```
+
+### Patient 2
+```json
+{
+  "email": "bob@example.com",
+  "firstName": "Bob",
+  "lastName": "Smith",
+  "dateOfBirth": "1992-08-15",
+  "gender": "Male",
+  "bloodType": "B-",
+  "phone": "+0987654321"
+}
+```
+
+### Medical Conditions to Test
+- Annual checkup (normal)
+- Flu diagnosis
+- Broken arm
+- Diabetes checkup
+- Surgery follow-up
+
+---
+
+## Debugging Failed Tests
+
+### "Cannot connect"
+- ✅ Is server running? Check terminal
+- ✅ Is port 8000 open?
+- ✅ Check URL is correct
+
+### "Unauthorized"
+- ✅ Did you include Authorization header?
+- ✅ Is token format correct? `Bearer YOUR_TOKEN`
+- ✅ Is token expired? Get a new one
+
+### "Validation failed"
+- ✅ Check your JSON syntax
+- ✅ Are all required fields included?
+- ✅ Are date formats correct? (ISO 8601)
+
+### "Patient not found"
+- ✅ Did you create patient first?
+- ✅ Are you using correct patient ID?
+- ✅ Check MongoDB has the data
+
+---
+
+## Pro Tips
+
+1. **Save your tokens in Postman** - Use variables
+2. **Create a collection** - Save all your requests
+3. **Use environments** - Switch between dev/prod
+4. **Check audit logs** - See all actions
+5. **Watch the server console** - Shows all requests
+
+---
+
+## Next Steps
+
+1. Test all endpoints manually
+2. Try invalid data (wrong formats, missing fields)
+3. Test error scenarios
+4. Check audit logs are working
+5. Try uploading different file types
+
+---
+
+**Happy Testing!** 🚀
+
+Need help? Check the server console for detailed error messages.
