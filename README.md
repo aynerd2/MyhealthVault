@@ -52,6 +52,9 @@ A comprehensive healthcare management system that enables secure storage and man
 ### Healthcare Worker Dashboard
 ![Healthcare Dashboard](./screenshots/healthcare-dashboard.png)
 
+### Role Dashboard Login
+![Login](./screenshots/login.png)
+
 ### Admin Dashboard
 ![Admin Dashboard](./screenshots/admin-dashboard.png)
 
