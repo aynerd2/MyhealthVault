@@ -3,10 +3,10 @@ const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
 
 // Auth0 config
-const AUTH0_DOMAIN = 'dev-3v7v1p2eitnky481.us.auth0.com';
-const AUTH0_AUDIENCE = 'https://healthvault-api';
-const CLIENT_ID = 'cmwa0nATJMuqzGzZwKoQUnBZznrLvgKq';
-const CLIENT_SECRET = 'Sxd2eZUXcDegYt2Wz4_6NACq5AYDCE17qYboekNa7YxEGUDMFVwhLPTs8Wo1YUqG';
+const AUTH0_DOMAIN = '';
+const AUTH0_AUDIENCE = '';
+const CLIENT_ID = '';
+const CLIENT_SECRET = '';
 
 // Setup JWKS client
 const client = jwksClient({
@@ -64,17 +64,3 @@ async function verifyToken() {
 
 // Run
 verifyToken();
-
-
-// const { getAccessTokenSilently } = useAuth0();
-// const token = await getAccessTokenSilently();
-
-// // Test profile endpoint
-// const response = await fetch('http://localhost:8000/api/users/me', {
-//   headers: {
-//     'Authorization': `Bearer ${token}`
-//   }
-// });
-
-// const data = await response.json();
-// console.log("NEW TOKEN DATA: ",data);
