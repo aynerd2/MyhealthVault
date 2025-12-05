@@ -42,12 +42,13 @@ export default function LoginPage() {
     }
   };
 
-  const testAccounts = [
-    { role: '👑 Admin', email: 'admin@healthvault.com', color: 'from-purple-500 to-pink-500' },
-    { role: '👨‍⚕️ Doctor', email: 'dr.smith@healthvault.com', color: 'from-blue-500 to-cyan-500' },
-    { role: '👩‍⚕️ Nurse', email: 'nurse.williams@healthvault.com', color: 'from-green-500 to-emerald-500' },
-    { role: '🧑 Patient', email: 'john.doe@example.com', color: 'from-orange-500 to-red-500' },
-  ];
+ const testAccounts = [
+  { role: '👑 Super Admin', email: 'superadmin@myhealthvault.com', color: 'from-purple-500 to-pink-500' },
+  { role: '🏥 Hospital Admin', email: 'hospitaladmin@generalcityhospital.com', color: 'from-blue-500 to-cyan-500' },
+  { role: '👨‍⚕️ Doctor', email: 'dr.smith@healthvault.com', color: 'from-green-500 to-emerald-500' },
+  { role: '🔬 Lab Tech', email: 'labtech@generalcityhospital.com', color: 'from-orange-500 to-red-500' },
+  { role: '🧑 Patient', email: 'john.doe@example.com', color: 'from-pink-500 to-rose-500' },
+];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 relative overflow-hidden">
@@ -266,7 +267,16 @@ export default function LoginPage() {
                     whileTap={{ scale: 0.95 }}
                     onClick={() => {
                       setEmail(account.email);
-                      setPassword('password123');
+                      // Update password based on role
+                      if (account.email.includes('superadmin')) {
+                        setPassword('superadmin123');
+                      } else if (account.email.includes('hospitaladmin')) {
+                        setPassword('hospitaladmin123');
+                      } else if (account.email.includes('labtech')) {
+                        setPassword('staff123');
+                      } else {
+                        setPassword('password123');
+                      }
                     }}
                     className={`p-3 bg-gradient-to-br ${account.color} text-white rounded-xl font-medium text-sm shadow-md hover:shadow-lg transition-all`}
                   >

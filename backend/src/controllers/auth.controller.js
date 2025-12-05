@@ -1,8 +1,8 @@
 // backend/src/controllers/auth.controller.js
 const User = require('../models/User.model.js');
-const { generateTokens, verifyRefreshToken } = require('../utils/jwt.js');
+const { generateTokens, generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/jwt');
 const crypto = require('crypto');
-
+const bcrypt = require('bcryptjs');
 /**
  * Register new user
  * POST /api/auth/register
@@ -135,102 +135,168 @@ exports.register = async (req, res) => {
  * Login user
  * POST /api/auth/login
  */
+// exports.login = async (req, res) => {
+//   try {
+//     const { email, password } = req.body;
+
+//     // Validate input
+//     if (!email || !password) {
+//       return res.status(400).json({
+//         error: 'Validation error',
+//         message: 'Email and password are required'
+//       });
+//     }
+
+//     // Find user (include password field)
+//     const user = await User.findOne({ email }).select('+password');
+    
+//     if (!user) {
+//       return res.status(401).json({
+//         error: 'Invalid credentials',
+//         message: 'Email or password is incorrect'
+//       });
+//     }
+
+//     // Check if account is locked
+//     if (user.isLocked) {
+//       return res.status(403).json({
+//         error: 'Account locked',
+//         message: 'Too many failed login attempts. Try again later.'
+//       });
+//     }
+
+//     // Check if account is active
+//     if (!user.isActive) {
+//       return res.status(403).json({
+//         error: 'Account disabled',
+//         message: 'Your account has been disabled. Contact support.'
+//       });
+//     }
+
+//     // Verify password
+//     const isPasswordValid = await user.comparePassword(password);
+    
+//     if (!isPasswordValid) {
+//       // Increment login attempts
+//       await user.incLoginAttempts();
+      
+//       return res.status(401).json({
+//         error: 'Invalid credentials',
+//         message: 'Email or password is incorrect'
+//       });
+//     }
+
+//     // Reset login attempts on successful login
+//     await user.resetLoginAttempts();
+
+//     // Check if pending approval
+//     if (user.role === 'pending_approval') {
+//       return res.status(403).json({
+//         error: 'Account pending approval',
+//         message: 'Your account is awaiting admin verification',
+//         status: 'pending_approval',
+//         user: {
+//           id: user._id,
+//           email: user.email,
+//           firstName: user.firstName,
+//           lastName: user.lastName,
+//           role: user.role,
+//           appliedRole: user.appliedRole
+//         }
+//       });
+//     }
+
+//     // Generate tokens
+//     const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+
+//     return res.status(200).json({
+//       message: 'Login successful',
+//       user: {
+//         id: user._id,
+//         email: user.email,
+//         firstName: user.firstName,
+//         lastName: user.lastName,
+//         role: user.role,
+//         isEmailVerified: user.isEmailVerified
+//       },
+//       accessToken,
+//       refreshToken
+//     });
+
+//   } catch (error) {
+//     console.error('Login error:', error);
+//     return res.status(500).json({
+//       error: 'Server error',
+//       message: 'Login failed'
+//     });
+//   }
+// };
+
+
+// backend/src/controllers/auth.controller.js - LOGIN FUNCTION
+
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate input
-    if (!email || !password) {
-      return res.status(400).json({
-        error: 'Validation error',
-        message: 'Email and password are required'
-      });
-    }
-
-    // Find user (include password field)
+    // Find user with password field (it's excluded by default)
     const user = await User.findOne({ email }).select('+password');
-    
+
     if (!user) {
       return res.status(401).json({
         error: 'Invalid credentials',
-        message: 'Email or password is incorrect'
+        message: 'Email or password is incorrect',
       });
     }
 
-    // Check if account is locked
-    if (user.isLocked) {
-      return res.status(403).json({
-        error: 'Account locked',
-        message: 'Too many failed login attempts. Try again later.'
-      });
-    }
+    // Compare password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
 
-    // Check if account is active
-    if (!user.isActive) {
-      return res.status(403).json({
-        error: 'Account disabled',
-        message: 'Your account has been disabled. Contact support.'
-      });
-    }
-
-    // Verify password
-    const isPasswordValid = await user.comparePassword(password);
-    
     if (!isPasswordValid) {
-      // Increment login attempts
-      await user.incLoginAttempts();
-      
       return res.status(401).json({
         error: 'Invalid credentials',
-        message: 'Email or password is incorrect'
+        message: 'Email or password is incorrect',
       });
     }
 
-    // Reset login attempts on successful login
-    await user.resetLoginAttempts();
-
-    // Check if pending approval
-    if (user.role === 'pending_approval') {
+    // Check if user is active
+    if (!user.isActive) {
       return res.status(403).json({
-        error: 'Account pending approval',
-        message: 'Your account is awaiting admin verification',
-        status: 'pending_approval',
-        user: {
-          id: user._id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          role: user.role,
-          appliedRole: user.appliedRole
-        }
+        error: 'Account inactive',
+        message: 'Your account has been deactivated',
       });
     }
+
+    // ✅ POPULATE hospital and department info
+    await user.populate([
+      { path: 'hospitalId', select: 'name email approvalStatus subscriptionStatus' },
+      { path: 'departmentId', select: 'name code' },
+    ]);
 
     // Generate tokens
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
 
-    return res.status(200).json({
+    // Remove password from response
+    const userResponse = user.toObject();
+    delete userResponse.password;
+
+    res.json({
       message: 'Login successful',
-      user: {
-        id: user._id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        isEmailVerified: user.isEmailVerified
-      },
+      user: userResponse,
       accessToken,
-      refreshToken
+      refreshToken,
     });
-
   } catch (error) {
     console.error('Login error:', error);
-    return res.status(500).json({
-      error: 'Server error',
-      message: 'Login failed'
+    res.status(500).json({
+      error: 'Login failed',
+      message: error.message,
     });
   }
 };
+
+
 
 /**
  * Refresh access token

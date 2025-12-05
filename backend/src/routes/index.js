@@ -1,6 +1,3 @@
-
-
-
 const express = require('express');
 const { body, param, query, validationResult } = require('express-validator');
 const multer = require('multer');
@@ -9,17 +6,78 @@ const {
   authenticate,
   requireHealthcareWorker,
   canAccessPatient,
+  requireSuperAdmin,
+  requireHospitalAdmin,
+  requireDepartmentStaff,
 } = require('../middleware/auth.js');
 const { logAudit} = require('../middleware/audit.js');
-const { User, MedicalRecord, Prescription, TestResult, AuditLog } = require('../models/index.js');
 const S3Service = require('../services/s3.service.js');
+const {
+  Hospital,
+  Department,
+  TestOrder,
+  User, 
+  MedicalRecord, 
+  Prescription, 
+  TestResult, 
+  AuditLog, 
+  HospitalSharing
+} = require('../models/index.js');
+
+
+const { validate } = require('../middleware/validate.js');
+
+
+// Import new route files
 const authRoutes = require('./auth.routes.js');
+const hospitalRoutes = require('./hospital.routes.js');
+const departmentRoutes = require('./department.routes.js');
+const testOrderRoutes = require('./testOrder.routes.js');
+const hospitalSharingRoutes = require('./hospitalSharing.routes.js');
+
+
 
 
 const router = express.Router();
 
 
+
+
+// Helper function to check if user can access patient from another hospital
+async function canAccessCrossHospital(userHospitalId, patientHospitalId) {
+  if (userHospitalId.toString() === patientHospitalId.toString()) {
+    return true; // Same hospital
+  }
+  
+  // Check if cross-hospital sharing is approved
+  return await HospitalSharing.canAccess(userHospitalId, patientHospitalId);
+}
+
+
+
+
+// ============================================
+// MOUNT ROUTES
+// ============================================
+
+// Auth routes
 router.use('/auth', authRoutes);
+
+// Hospital routes
+router.use('/hospitals', hospitalRoutes);
+
+// Department routes
+router.use('/departments', departmentRoutes);
+
+// Test order routes
+router.use('/test-orders', testOrderRoutes);
+
+// Hospital sharing routes
+router.use('/hospital-sharing', hospitalSharingRoutes);
+
+
+
+
 
 
 // ==================== FILE UPLOAD CONFIGURATION ====================
@@ -36,25 +94,28 @@ const upload = multer({
 });
 
 // ==================== VALIDATION HELPER ====================
-function validate(req, res, next) {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ 
-      error: 'Validation failed',
-      errors: errors.array() 
-    });
-  }
-  next();
-}
+// function validate(req, res, next) {
+//   const errors = validationResult(req);
+//   if (!errors.isEmpty()) {
+//     return res.status(400).json({ 
+//       error: 'Validation failed',
+//       errors: errors.array() 
+//     });
+//   }
+//   next();
+// }
 
 // ==================== HEALTH CHECK ====================
+
 router.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
   });
 });
+
 
 // ==================== USER/PROFILE ROUTES ====================
 
@@ -194,27 +255,28 @@ authenticate,
  * GET /api/admin/pending-approvals
  * Admin only - see all users waiting for approval
  */
-router.get('/admin/pending-approvals',
+router.get(
+  '/admin/pending-approvals',
   authenticate,
-  requireRole('admin'),
+  requireHospitalAdmin,
   async (req, res) => {
     try {
       const pendingUsers = await User.find({
-        role: 'pending_approval',
+        hospitalId: req.hospitalId,
         approvalStatus: 'pending',
-      })
-      .select('firstName lastName email licenseNumber specialization hospitalAffiliation appliedRole appliedAt')
-      .sort({ appliedAt: -1 });
-
-      await logAudit(req.user._id, 'READ', 'pending_approvals', 'all', req);
+        role: { $in: ['doctor', 'nurse', 'department_staff'] },
+      }).select('-password');
 
       res.json({
         count: pendingUsers.length,
-        users: pendingUsers,
+        data: pendingUsers,
       });
     } catch (error) {
-      console.error('Get pending approvals error:', error);
-      res.status(500).json({ error: 'Failed to get pending approvals' });
+      console.error('Fetch pending approvals error:', error);
+      res.status(500).json({
+        error: 'Failed to fetch pending approvals',
+        message: error.message,
+      });
     }
   }
 );
@@ -224,233 +286,366 @@ router.get('/admin/pending-approvals',
  * POST /api/admin/approve-user/:userId
  * Admin only - approve a healthcare worker
  */
-router.post('/admin/approve/:userId',
-  authenticate,
-  requireRole('admin'),
-  [
-    param('userId').isMongoId(),
-    body('role').isIn(['doctor', 'nurse']),
-    body('verificationNotes').optional().trim(),
-  ],
-  validate,
-  async (req, res) => {
-    try {
-      const user = await User.findById(req.params.userId);
 
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+router.post('/admin/approve/:userId', authenticate, requireHospitalAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { departmentId } = req.body;
 
-      if (user.role !== 'pending_approval' || user.approvalStatus !== 'pending') {
-        return res.status(400).json({ 
-          error: 'User is not pending approval',
-          currentStatus: user.approvalStatus,
-        });
-      }
+    const user = await User.findById(userId);
 
-      // Update user to approved role
-      user.role = req.body.role;
-      user.approvalStatus = 'approved';
-      user.approvedBy = req.user._id;
-      user.approvedAt = new Date();
-      user.verificationNotes = req.body.verificationNotes;
-      
-      await user.save();
-
-      await logAudit(
-        req.user._id,
-        'UPDATE',
-        'user_approval',
-        user._id.toString(),
-        req,
-        `Approved ${user.email} as ${req.body.role}`
-      );
-
-      // TODO: Send approval email to user
-      // await sendApprovalEmail(user);
-
-      res.json({
-        message: 'User approved successfully',
-        user: {
-          id: user._id,
-          email: user.email,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          role: user.role,
-          approvalStatus: user.approvalStatus,
-          approvedAt: user.approvedAt,
-        },
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User not found',
       });
-    } catch (error) {
-      console.error('Approve user error:', error);
-      res.status(500).json({ error: 'Failed to approve user' });
     }
+
+    // Check if user belongs to admin's hospital
+    if (user.hospitalId?.toString() !== req.hospitalId.toString()) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You can only approve users in your hospital',
+      });
+    }
+
+    user.approvalStatus = 'approved';
+    user.approvedBy = req.userId;
+    user.isActive = true;
+
+    // Assign department if provided
+    if (departmentId) {
+      const department = await Department.findById(departmentId);
+      if (department && department.hospitalId.toString() === req.hospitalId.toString()) {
+        user.departmentId = departmentId;
+      }
+    }
+
+    await user.save();
+
+    await logAudit(req.userId, 'APPROVE', 'User', userId, {
+      role: user.role,
+      hospitalId: req.hospitalId,
+    });
+
+    res.json({
+      message: 'User approved successfully',
+      data: user,
+    });
+  } catch (error) {
+    console.error('User approval error:', error);
+    res.status(500).json({
+      error: 'Approval failed',
+      message: error.message,
+    });
   }
-);
+});
 
 /**
  * REJECT USER
  * POST /api/admin/reject-user/:userId
  * Admin only - reject a healthcare worker application
  */
-router.post('/admin/reject/:userId',
+// router.post('/admin/reject/:userId',
+//   authenticate,
+//   requireRole('admin'),
+//   [
+//     param('userId').isMongoId(),
+//     body('rejectionReason').trim().notEmpty(),
+//   ],
+//   validate,
+//   async (req, res) => {
+//     try {
+//       const user = await User.findById(req.params.userId);
+
+//       if (!user) {
+//         return res.status(404).json({ error: 'User not found' });
+//       }
+
+//       if (user.role !== 'pending_approval' || user.approvalStatus !== 'pending') {
+//         return res.status(400).json({ 
+//           error: 'User is not pending approval',
+//           currentStatus: user.approvalStatus,
+//         });
+//       }
+
+//       // Mark as rejected
+//       user.approvalStatus = 'rejected';
+//       user.rejectionReason = req.body.rejectionReason;
+//       user.approvedBy = req.user._id;
+//       user.approvedAt = new Date();
+      
+//       await user.save();
+
+//       await logAudit(
+//         req.user._id,
+//         'UPDATE',
+//         'user_rejection',
+//         user._id.toString(),
+//         req,
+//         `Rejected ${user.email}: ${req.body.rejectionReason}`
+//       );
+
+//       // TODO: Send rejection email to user
+//       // await sendRejectionEmail(user, req.body.rejectionReason);
+
+//       res.json({
+//         message: 'User application rejected',
+//         user: {
+//           id: user._id,
+//           email: user.email,
+//           approvalStatus: user.approvalStatus,
+//         },
+//       });
+//     } catch (error) {
+//       console.error('Reject user error:', error);
+//       res.status(500).json({ error: 'Failed to reject user' });
+//     }
+//   }
+// );
+
+router.post(
+  '/admin/reject/:userId',
   authenticate,
-  requireRole('admin'),
-  [
-    param('userId').isMongoId(),
-    body('rejectionReason').trim().notEmpty(),
-  ],
-  validate,
+  requireHospitalAdmin,
+  [body('reason').optional().trim(), validate],
   async (req, res) => {
     try {
-      const user = await User.findById(req.params.userId);
+      const { userId } = req.params;
+      const { reason } = req.body;
+
+      const user = await User.findById(userId);
 
       if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      if (user.role !== 'pending_approval' || user.approvalStatus !== 'pending') {
-        return res.status(400).json({ 
-          error: 'User is not pending approval',
-          currentStatus: user.approvalStatus,
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'User not found',
         });
       }
 
-      // Mark as rejected
+      if (user.hospitalId?.toString() !== req.hospitalId.toString()) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'You can only reject users in your hospital',
+        });
+      }
+
       user.approvalStatus = 'rejected';
-      user.rejectionReason = req.body.rejectionReason;
-      user.approvedBy = req.user._id;
-      user.approvedAt = new Date();
+      user.approvedBy = req.userId;
+      user.isActive = false;
       
+      if (reason) {
+        user.rejectionReason = reason;
+      }
+
       await user.save();
 
-      await logAudit(
-        req.user._id,
-        'UPDATE',
-        'user_rejection',
-        user._id.toString(),
-        req,
-        `Rejected ${user.email}: ${req.body.rejectionReason}`
-      );
-
-      // TODO: Send rejection email to user
-      // await sendRejectionEmail(user, req.body.rejectionReason);
+      await logAudit(req.userId, 'REJECT', 'User', userId, {
+        reason,
+        hospitalId: req.hospitalId,
+      });
 
       res.json({
-        message: 'User application rejected',
-        user: {
-          id: user._id,
-          email: user.email,
-          approvalStatus: user.approvalStatus,
-        },
+        message: 'User rejected',
+        data: user,
       });
     } catch (error) {
-      console.error('Reject user error:', error);
-      res.status(500).json({ error: 'Failed to reject user' });
+      console.error('User rejection error:', error);
+      res.status(500).json({
+        error: 'Rejection failed',
+        message: error.message,
+      });
     }
   }
 );
+
+
 
 /**
  * GET ALL USERS (ADMIN ONLY)
  * GET /api/admin/users
  * Admin can see all users with their statuses
  */
-router.get('/admin/users',
-  authenticate,
-  requireRole('admin'),
-  async (req, res) => {
-    try {
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 50;
-      const skip = (page - 1) * limit;
+// router.get('/admin/users',
+//   authenticate,
+//   requireRole('admin'),
+//   async (req, res) => {
+//     try {
+//       const page = parseInt(req.query.page) || 1;
+//       const limit = parseInt(req.query.limit) || 50;
+//       const skip = (page - 1) * limit;
 
-      const query = {};
+//       const query = {};
       
-      // Filter by role if provided
-      if (req.query.role) {
-        query.role = req.query.role;
-      }
+//       // Filter by role if provided
+//       if (req.query.role) {
+//         query.role = req.query.role;
+//       }
       
-      // Filter by approval status if provided
-      if (req.query.approvalStatus) {
-        query.approvalStatus = req.query.approvalStatus;
-      }
+//       // Filter by approval status if provided
+//       if (req.query.approvalStatus) {
+//         query.approvalStatus = req.query.approvalStatus;
+//       }
 
-      const [users, total] = await Promise.all([
-        User.find(query)
-          .select('-auth0Id') // Don't expose Auth0 ID
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limit),
-        User.countDocuments(query),
-      ]);
+//       const [users, total] = await Promise.all([
+//         User.find(query)
+//           .select('-auth0Id') // Don't expose Auth0 ID
+//           .sort({ createdAt: -1 })
+//           .skip(skip)
+//           .limit(limit),
+//         User.countDocuments(query),
+//       ]);
 
-      res.json({
-        users,
-        pagination: {
-          page,
-          limit,
-          total,
-          pages: Math.ceil(total / limit),
-        },
-      });
-    } catch (error) {
-      console.error('Get users error:', error);
-      res.status(500).json({ error: 'Failed to get users' });
+//       res.json({
+//         users,
+//         pagination: {
+//           page,
+//           limit,
+//           total,
+//           pages: Math.ceil(total / limit),
+//         },
+//       });
+//     } catch (error) {
+//       console.error('Get users error:', error);
+//       res.status(500).json({ error: 'Failed to get users' });
+//     }
+//   }
+// );
+
+router.get('/admin/users', authenticate, requireHospitalAdmin, async (req, res) => {
+  try {
+    const { role, departmentId, status, search } = req.query;
+
+    const query = { hospitalId: req.hospitalId };
+
+    if (role) query.role = role;
+    if (departmentId) query.departmentId = departmentId;
+    if (status) query.approvalStatus = status;
+    if (search) {
+      query.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+      ];
     }
+
+    const users = await User.find(query)
+      .populate('departmentId', 'name code')
+      .select('-password')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      count: users.length,
+      data: users,
+    });
+  } catch (error) {
+    console.error('Fetch users error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch users',
+      message: error.message,
+    });
   }
-);
+});
+
+
+
+
 
 /**
  * UPDATE USER STATUS (ADMIN ONLY)
  * PUT /api/admin/users/:userId/status
  * Admin can activate/deactivate users
  */
-router.put('/admin/users/:userId/status',
+// router.put('/admin/users/:userId/status',
+//   authenticate,
+//   requireRole('admin'),
+//   [
+//     param('userId').isMongoId(),
+//     body('isActive').isBoolean(),
+//   ],
+//   validate,
+//   async (req, res) => {
+//     try {
+//       const user = await User.findById(req.params.userId);
+
+//       if (!user) {
+//         return res.status(404).json({ error: 'User not found' });
+//       }
+
+//       user.isActive = req.body.isActive;
+//       await user.save();
+
+//       await logAudit(
+//         req.user._id,
+//         'UPDATE',
+//         'user_status',
+//         user._id.toString(),
+//         req,
+//         `Set ${user.email} active status to ${req.body.isActive}`
+//       );
+
+//       res.json({
+//         message: 'User status updated',
+//         user: {
+//           id: user._id,
+//           email: user.email,
+//           isActive: user.isActive,
+//         },
+//       });
+//     } catch (error) {
+//       console.error('Update user status error:', error);
+//       res.status(500).json({ error: 'Failed to update user status' });
+//     }
+//   }
+// );
+
+router.put(
+  '/admin/users/:userId/status',
   authenticate,
-  requireRole('admin'),
-  [
-    param('userId').isMongoId(),
-    body('isActive').isBoolean(),
-  ],
-  validate,
+  requireHospitalAdmin,
+  [body('isActive').isBoolean(), validate],
   async (req, res) => {
     try {
-      const user = await User.findById(req.params.userId);
+      const { userId } = req.params;
+      const { isActive } = req.body;
+
+      const user = await User.findById(userId);
 
       if (!user) {
-        return res.status(404).json({ error: 'User not found' });
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'User not found',
+        });
       }
 
-      user.isActive = req.body.isActive;
+      if (user.hospitalId?.toString() !== req.hospitalId.toString()) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'You can only manage users in your hospital',
+        });
+      }
+
+      user.isActive = isActive;
       await user.save();
 
-      await logAudit(
-        req.user._id,
-        'UPDATE',
-        'user_status',
-        user._id.toString(),
-        req,
-        `Set ${user.email} active status to ${req.body.isActive}`
-      );
+      await logAudit(req.userId, 'UPDATE', 'User', userId, {
+        isActive,
+        hospitalId: req.hospitalId,
+      });
 
       res.json({
         message: 'User status updated',
-        user: {
-          id: user._id,
-          email: user.email,
-          isActive: user.isActive,
-        },
+        data: user,
       });
     } catch (error) {
       console.error('Update user status error:', error);
-      res.status(500).json({ error: 'Failed to update user status' });
+      res.status(500).json({
+        error: 'Update failed',
+        message: error.message,
+      });
     }
   }
 );
-
-
 
 
 
@@ -545,33 +740,96 @@ router.patch('/users/me',
  * GET /api/patients/search?q=john
  * Only healthcare workers can search
  */
-router.get('/patients/search',
-  authenticate,
-  requireHealthcareWorker,
-  query('q').notEmpty(),
-  validate,
-  async (req, res) => {
-    try {
-      const searchQuery = req.query.q;
+// router.get('/patients/search',
+//   authenticate,
+//   requireHealthcareWorker,
+//   query('q').notEmpty(),
+//   validate,
+//   async (req, res) => {
+//     try {
+//       const searchQuery = req.query.q;
       
-      const patients = await User.find({
-        role: 'patient',
-        $or: [
-          { firstName: new RegExp(searchQuery, 'i') },
-          { lastName: new RegExp(searchQuery, 'i') },
-          { email: new RegExp(searchQuery, 'i') },
-        ],
-      })
-      .select('firstName lastName email dateOfBirth gender bloodType')
+//       const patients = await User.find({
+//         role: 'patient',
+//         $or: [
+//           { firstName: new RegExp(searchQuery, 'i') },
+//           { lastName: new RegExp(searchQuery, 'i') },
+//           { email: new RegExp(searchQuery, 'i') },
+//         ],
+//       })
+//       .select('firstName lastName email dateOfBirth gender bloodType')
+//       .limit(20);
+
+//       res.json(patients);
+//     } catch (error) {
+//       console.error('Search patients error:', error);
+//       res.status(500).json({ error: 'Search failed' });
+//     }
+//   }
+// );
+
+router.get('/patients/search', authenticate, requireHealthcareWorker, async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return res.status(400).json({
+        error: 'Invalid Query',
+        message: 'Search query must be at least 2 characters',
+      });
+    }
+
+    // Build query for accessible hospitals
+    const accessibleHospitals = [req.hospitalId];
+
+    // Add shared hospitals
+    const sharings = await HospitalSharing.find({
+      requestingHospitalId: req.hospitalId,
+      status: 'approved',
+      isActive: true,
+    });
+
+    sharings.forEach((sharing) => {
+      if (!sharing.isExpired) {
+        accessibleHospitals.push(sharing.targetHospitalId);
+      }
+    });
+
+    const searchQuery = {
+      role: 'patient',
+      hospitalId: { $in: accessibleHospitals },
+      $or: [
+        { firstName: { $regex: q, $options: 'i' } },
+        { lastName: { $regex: q, $options: 'i' } },
+        { email: { $regex: q, $options: 'i' } },
+      ],
+    };
+
+    const patients = await User.find(searchQuery)
+      .populate('hospitalId', 'name')
+      .select('-password')
       .limit(20);
 
-      res.json(patients);
-    } catch (error) {
-      console.error('Search patients error:', error);
-      res.status(500).json({ error: 'Search failed' });
-    }
+    res.json({
+      count: patients.length,
+      data: patients,
+    });
+  } catch (error) {
+    console.error('Patient search error:', error);
+    res.status(500).json({
+      error: 'Search failed',
+      message: error.message,
+    });
   }
-);
+});
+
+
+
+
+
+
+
+
 
 /**
  * GET PATIENT DETAILS
@@ -620,24 +878,24 @@ router.get('/patients/:patientId',
  * GET MEDICAL RECORDS FOR A PATIENT
  * GET /api/medical-records/patient/:patientId
  */
-router.get('/medical-records/patient/:patientId',
-  authenticate,
-  canAccessPatient,
-  async (req, res) => {
-    try {
-      const records = await MedicalRecord.find({ 
-        patientId: req.params.patientId 
-      })
-        .populate('doctorId', 'firstName lastName specialization')
-        .sort({ visitDate: -1 });
+// router.get('/medical-records/patient/:patientId',
+//   authenticate,
+//   canAccessPatient,
+//   async (req, res) => {
+//     try {
+//       const records = await MedicalRecord.find({ 
+//         patientId: req.params.patientId 
+//       })
+//         .populate('doctorId', 'firstName lastName specialization')
+//         .sort({ visitDate: -1 });
 
-      res.json(records);
-    } catch (error) {
-      console.error('Get medical records error:', error);
-      res.status(500).json({ error: 'Failed to get medical records' });
-    }
-  }
-);
+//       res.json(records);
+//     } catch (error) {
+//       console.error('Get medical records error:', error);
+//       res.status(500).json({ error: 'Failed to get medical records' });
+//     }
+//   }
+// );
 
 
 // router.post('/medical-records',
@@ -691,39 +949,141 @@ router.get('/medical-records/patient/:patientId',
 //   }
 // );
 
-router.post('/medical-records',
+router.get(
+  '/medical-records/patient/:patientId',
   authenticate,
-  requireHealthcareWorker,
-  [
-    body('patientId').isMongoId(),
-    body('diagnosis').trim().notEmpty(),
-    body('visitDate').isISO8601().toDate(),
-    body('hospitalName').trim().notEmpty(),
-  ],
-  validate,
+  canAccessPatient,
   async (req, res) => {
     try {
-      const record = await MedicalRecord.create({
-        ...req.body,
-        doctorId: req.user._id,
+      const { patientId } = req.params;
+      const { hospitalId } = req.query; // Optional: filter by hospital
+
+      const query = { patientId };
+
+      // If user is patient, show all their records from all hospitals
+      if (req.user.role === 'patient') {
+        // No hospital filter - show everything
+      } else {
+        // Healthcare worker or admin
+        if (hospitalId) {
+          // Filter by specific hospital
+          query.hospitalId = hospitalId;
+        } else {
+          // Show records from user's hospital + shared hospitals
+          const accessibleHospitals = [req.hospitalId];
+          
+          // Get shared hospitals
+          const sharings = await HospitalSharing.find({
+            requestingHospitalId: req.hospitalId,
+            status: 'approved',
+            isActive: true,
+          });
+          
+          sharings.forEach((sharing) => {
+            if (!sharing.isExpired) {
+              accessibleHospitals.push(sharing.targetHospitalId);
+            }
+          });
+          
+          query.hospitalId = { $in: accessibleHospitals };
+        }
+      }
+
+      const records = await MedicalRecord.find(query)
+        .populate('doctorId', 'firstName lastName specialization')
+        .populate('hospitalId', 'name')
+        .populate('departmentId', 'name code')
+        .populate({
+          path: 'testOrders',
+          populate: {
+            path: 'departmentId',
+            select: 'name code',
+          },
+        })
+        .sort({ visitDate: -1 });
+
+      res.json({
+        count: records.length,
+        data: records,
       });
-
-      await logAudit(
-        req.user._id,
-        'CREATE',
-        'medical_record',
-        record._id.toString(),
-        req
-      );
-
-      res.status(201).json(record);
     } catch (error) {
-      console.error('Create medical record error:', error);
-      res.status(500).json({ error: 'Failed to create medical record' });
+      console.error('Fetch medical records error:', error);
+      res.status(500).json({
+        error: 'Failed to fetch medical records',
+        message: error.message,
+      });
     }
   }
 );
 
+
+
+
+
+
+router.post(
+  '/medical-records',
+  authenticate,
+  requireHealthcareWorker,
+  [
+    body('patientId').notEmpty().withMessage('Patient ID is required'),
+    body('diagnosis').trim().notEmpty().withMessage('Diagnosis is required'),
+    body('visitDate').isISO8601().withMessage('Valid visit date is required'),
+    validate,
+  ],
+  canAccessPatient,
+  async (req, res) => {
+    try {
+      const {
+        patientId,
+        diagnosis,
+        symptoms,
+        treatment,
+        notes,
+        visitDate,
+        visitType,
+        vitalSigns,
+      } = req.body;
+
+      // Create medical record
+      const record = await MedicalRecord.create({
+        patientId,
+        doctorId: req.userId,
+        hospitalId: req.hospitalId,
+        departmentId: req.departmentId,
+        diagnosis,
+        symptoms,
+        treatment,
+        notes,
+        visitDate: new Date(visitDate),
+        visitType,
+        vitalSigns,
+      });
+
+      const populatedRecord = await MedicalRecord.findById(record._id)
+        .populate('doctorId', 'firstName lastName specialization')
+        .populate('hospitalId', 'name')
+        .populate('departmentId', 'name code');
+
+      // Log audit trail
+      await logAudit(req.userId, 'CREATE', 'MedicalRecord', record._id, {
+        patientId,
+        hospitalId: req.hospitalId,
+      });
+
+      res.status(201).json({
+        message: 'Medical record created successfully',
+        data: populatedRecord,
+      });
+    } catch (error) {
+      console.error('Create medical record error:', error);
+      res.status(500).json({
+        error: 'Creation failed',
+        message: error.message,
+      });
+    }
+  }
+);
 
 
 
@@ -763,6 +1123,134 @@ router.get('/patients/:patientId/medical-records',
 
 
 
+
+/**
+ * @route   GET /api/medical-records/:recordId
+ * @desc    Get single medical record
+ * @access  Doctor, Nurse, Patient (own data)
+ */
+router.get('/medical-records/:recordId', authenticate, async (req, res) => {
+  try {
+    const { recordId } = req.params;
+
+    const record = await MedicalRecord.findById(recordId)
+      .populate('patientId', 'firstName lastName email phone')
+      .populate('doctorId', 'firstName lastName specialization')
+      .populate('hospitalId', 'name email phone address')
+      .populate('departmentId', 'name code')
+      .populate({
+        path: 'testOrders',
+        populate: [
+          { path: 'departmentId', select: 'name code' },
+          { path: 'resultUploadedBy', select: 'firstName lastName' },
+        ],
+      });
+
+    if (!record) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Medical record not found',
+      });
+    }
+
+    // Check access
+    const isPatient = req.user.role === 'patient' && 
+                      record.patientId._id.toString() === req.userId.toString();
+    const isDoctor = record.doctorId._id.toString() === req.userId.toString();
+    const isSameHospital = record.hospitalId._id.toString() === req.hospitalId?.toString();
+    const canAccessShared = await canAccessCrossHospital(req.hospitalId, record.hospitalId._id);
+
+    if (!isPatient && !isDoctor && !isSameHospital && !canAccessShared && req.user.role !== 'super_admin') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have permission to view this record',
+      });
+    }
+
+    res.json({ data: record });
+  } catch (error) {
+    console.error('Fetch medical record error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch medical record',
+      message: error.message,
+    });
+  }
+});
+
+
+
+
+
+/**
+ * @route   PUT /api/medical-records/:recordId
+ * @desc    Update medical record
+ * @access  Doctor (who created it)
+ */
+router.put(
+  '/medical-records/:recordId',
+  authenticate,
+  requireHealthcareWorker,
+  async (req, res) => {
+    try {
+      const { recordId } = req.params;
+
+      const record = await MedicalRecord.findById(recordId);
+
+      if (!record) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Medical record not found',
+        });
+      }
+
+      // Only the doctor who created it can update (or hospital admin)
+      if (record.doctorId.toString() !== req.userId.toString() && 
+          req.user.role !== 'hospital_admin') {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'You can only update your own records',
+        });
+      }
+
+      const allowedUpdates = [
+        'diagnosis',
+        'symptoms',
+        'treatment',
+        'notes',
+        'vitalSigns',
+        'visitType',
+      ];
+
+      allowedUpdates.forEach((field) => {
+        if (req.body[field] !== undefined) {
+          record[field] = req.body[field];
+        }
+      });
+
+      await record.save();
+
+      const updatedRecord = await MedicalRecord.findById(recordId)
+        .populate('doctorId', 'firstName lastName specialization')
+        .populate('hospitalId', 'name')
+        .populate('departmentId', 'name code');
+
+      await logAudit(req.userId, 'UPDATE', 'MedicalRecord', recordId, {
+        updates: req.body,
+      });
+
+      res.json({
+        message: 'Medical record updated successfully',
+        data: updatedRecord,
+      });
+    } catch (error) {
+      console.error('Update medical record error:', error);
+      res.status(500).json({
+        error: 'Update failed',
+        message: error.message,
+      });
+    }
+  }
+);
 
 
 
@@ -816,6 +1304,70 @@ router.patch('/medical-records/:id',
     }
   }
 );
+
+
+/**
+ * @route   GET /api/medical-records/hospital/all
+ * @desc    Get all medical records in hospital (for hospital admin)
+ * @access  Hospital Admin
+ */
+router.get(
+  '/medical-records/hospital/all',
+  authenticate,
+  requireHospitalAdmin,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, search, departmentId, doctorId } = req.query;
+
+      const query = { hospitalId: req.hospitalId };
+
+      if (departmentId) query.departmentId = departmentId;
+      if (doctorId) query.doctorId = doctorId;
+      if (search) {
+        query.$or = [
+          { diagnosis: { $regex: search, $options: 'i' } },
+          { symptoms: { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const records = await MedicalRecord.find(query)
+        .populate('patientId', 'firstName lastName email')
+        .populate('doctorId', 'firstName lastName specialization')
+        .populate('departmentId', 'name code')
+        .sort({ visitDate: -1 })
+        .limit(limit * 1)
+        .skip((page - 1) * limit);
+
+      const total = await MedicalRecord.countDocuments(query);
+
+      res.json({
+        count: records.length,
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / limit),
+        data: records,
+      });
+    } catch (error) {
+      console.error('Fetch hospital records error:', error);
+      res.status(500).json({
+        error: 'Failed to fetch records',
+        message: error.message,
+      });
+    }
+  }
+);
+
+
+
+
+
+
+
+
+
+
+
+
 
 // ==================== PRESCRIPTIONS ====================
 
@@ -880,24 +1432,83 @@ router.post('/prescriptions',
  * GET PRESCRIPTIONS FOR A PATIENT
  * GET /api/prescriptions/patient/:patientId
  */
-router.get('/prescriptions/patient/:patientId',
+// router.get('/prescriptions/patient/:patientId',
+//   authenticate,
+//   canAccessPatient,
+//   async (req, res) => {
+//     try {
+//       const prescriptions = await Prescription.find({ 
+//         patientId: req.params.patientId 
+//       })
+//         .populate('doctorId', 'firstName lastName specialization')
+//         .sort({ prescribedDate: -1 });
+
+//       res.json(prescriptions);
+//     } catch (error) {
+//       console.error('Get prescriptions error:', error);
+//       res.status(500).json({ error: 'Failed to get prescriptions' });
+//     }
+//   }
+// );
+
+router.get(
+  '/prescriptions/patient/:patientId',
   authenticate,
   canAccessPatient,
   async (req, res) => {
     try {
-      const prescriptions = await Prescription.find({ 
-        patientId: req.params.patientId 
-      })
+      const { patientId } = req.params;
+      const { hospitalId, status } = req.query;
+
+      const query = { patientId };
+
+      // Apply hospital filter based on user role
+      if (req.user.role === 'patient') {
+        // Patients see all their prescriptions
+      } else {
+        if (hospitalId) {
+          query.hospitalId = hospitalId;
+        } else {
+          // Show prescriptions from accessible hospitals
+          const accessibleHospitals = [req.hospitalId];
+          
+          const sharings = await HospitalSharing.find({
+            requestingHospitalId: req.hospitalId,
+            status: 'approved',
+            isActive: true,
+          });
+          
+          sharings.forEach((sharing) => {
+            if (!sharing.isExpired) {
+              accessibleHospitals.push(sharing.targetHospitalId);
+            }
+          });
+          
+          query.hospitalId = { $in: accessibleHospitals };
+        }
+      }
+
+      if (status) query.status = status;
+
+      const prescriptions = await Prescription.find(query)
         .populate('doctorId', 'firstName lastName specialization')
+        .populate('hospitalId', 'name')
         .sort({ prescribedDate: -1 });
 
-      res.json(prescriptions);
+      res.json({
+        count: prescriptions.length,
+        data: prescriptions,
+      });
     } catch (error) {
-      console.error('Get prescriptions error:', error);
-      res.status(500).json({ error: 'Failed to get prescriptions' });
+      console.error('Fetch prescriptions error:', error);
+      res.status(500).json({
+        error: 'Failed to fetch prescriptions',
+        message: error.message,
+      });
     }
   }
 );
+
 
 
 
@@ -905,74 +1516,323 @@ router.get('/prescriptions/patient/:patientId',
  * CREATE PRESCRIPTION
  * POST /api/prescriptions
  */
-router.post('/prescriptions',
+// router.post('/prescriptions',
+//   authenticate,
+//   requireHealthcareWorker,
+//   [
+//     body('patientId').isMongoId(),
+//     body('medicationName').trim().notEmpty(),
+//     body('dosage').trim().notEmpty(),
+//     body('frequency').trim().notEmpty(),
+//     body('duration').trim().notEmpty(),
+//     body('hospitalName').trim().notEmpty(),
+//     body('prescribedDate').isISO8601().toDate(),
+//   ],
+//   validate,
+//   async (req, res) => {
+//     try {
+//       const prescription = await Prescription.create({
+//         ...req.body,
+//         doctorId: req.user._id,
+//       });
+
+//       await logAudit(
+//         req.user._id,
+//         'CREATE',
+//         'prescription',
+//         prescription._id.toString(),
+//         req
+//       );
+
+//       res.status(201).json(prescription);
+//     } catch (error) {
+//       console.error('Create prescription error:', error);
+//       res.status(500).json({ error: 'Failed to create prescription' });
+//     }
+//   }
+// );
+
+router.post(
+  '/prescriptions',
   authenticate,
   requireHealthcareWorker,
   [
-    body('patientId').isMongoId(),
-    body('medicationName').trim().notEmpty(),
-    body('dosage').trim().notEmpty(),
-    body('frequency').trim().notEmpty(),
-    body('duration').trim().notEmpty(),
-    body('hospitalName').trim().notEmpty(),
-    body('prescribedDate').isISO8601().toDate(),
+    body('patientId').notEmpty().withMessage('Patient ID is required'),
+    body('medication').trim().notEmpty().withMessage('Medication is required'),
+    body('dosage').trim().notEmpty().withMessage('Dosage is required'),
+    body('frequency').trim().notEmpty().withMessage('Frequency is required'),
+    body('duration').trim().notEmpty().withMessage('Duration is required'),
+    validate,
   ],
-  validate,
+  canAccessPatient,
   async (req, res) => {
     try {
+      const {
+        patientId,
+        medication,
+        dosage,
+        frequency,
+        duration,
+        instructions,
+        notes,
+        refillable,
+        refillsAllowed,
+      } = req.body;
+
       const prescription = await Prescription.create({
-        ...req.body,
-        doctorId: req.user._id,
+        patientId,
+        doctorId: req.userId,
+        hospitalId: req.hospitalId,
+        medication,
+        dosage,
+        frequency,
+        duration,
+        instructions,
+        notes,
+        prescribedDate: new Date(),
+        refillable: refillable || false,
+        refillsAllowed: refillsAllowed || 0,
+        refillsRemaining: refillsAllowed || 0,
+        status: 'active',
       });
 
-      await logAudit(
-        req.user._id,
-        'CREATE',
-        'prescription',
-        prescription._id.toString(),
-        req
-      );
+      const populatedPrescription = await Prescription.findById(prescription._id)
+        .populate('doctorId', 'firstName lastName specialization')
+        .populate('hospitalId', 'name');
 
-      res.status(201).json(prescription);
+      await logAudit(req.userId, 'CREATE', 'Prescription', prescription._id, {
+        patientId,
+        medication,
+      });
+
+      res.status(201).json({
+        message: 'Prescription created successfully',
+        data: populatedPrescription,
+      });
     } catch (error) {
       console.error('Create prescription error:', error);
-      res.status(500).json({ error: 'Failed to create prescription' });
+      res.status(500).json({
+        error: 'Creation failed',
+        message: error.message,
+      });
     }
   }
 );
+
+
+
 
 
 /**
  * GET PATIENT'S PRESCRIPTIONS
  * GET /api/patients/:patientId/prescriptions
  */
-router.get('/patients/:patientId/prescriptions',
+// router.get('/patients/:patientId/prescriptions',
+//   authenticate,
+//   canAccessPatient,
+//   param('patientId').isMongoId(),
+//   validate,
+//   async (req, res) => {
+//     try {
+//       const query = { patientId: req.params.patientId };
+      
+//       if (req.query.active === 'true') {
+//         query.isActive = true;
+//       }
+
+//       const prescriptions = await Prescription.find(query)
+//         .populate('doctorId', 'firstName lastName specialization')
+//         .sort({ prescribedDate: -1 })
+//         .limit(100);
+
+//       await logAudit(req.user._id, 'READ', 'prescriptions', req.params.patientId, req);
+
+//       res.json(prescriptions);
+//     } catch (error) {
+//       console.error('Get prescriptions error:', error);
+//       res.status(500).json({ error: 'Failed to get prescriptions' });
+//     }
+//   }
+// );
+
+
+router.get('/prescriptions/:prescriptionId', authenticate, async (req, res) => {
+  try {
+    const { prescriptionId } = req.params;
+
+    const prescription = await Prescription.findById(prescriptionId)
+      .populate('patientId', 'firstName lastName email phone')
+      .populate('doctorId', 'firstName lastName specialization email phone')
+      .populate('hospitalId', 'name email phone address');
+
+    if (!prescription) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Prescription not found',
+      });
+    }
+
+    // Check access
+    const isPatient = req.user.role === 'patient' && 
+                      prescription.patientId._id.toString() === req.userId.toString();
+    const isDoctor = prescription.doctorId._id.toString() === req.userId.toString();
+    const isSameHospital = prescription.hospitalId._id.toString() === req.hospitalId?.toString();
+    const isPharmacist = req.user.role === 'department_staff' && 
+                         req.user.departmentRole === 'pharmacist';
+
+    if (!isPatient && !isDoctor && !isSameHospital && !isPharmacist && req.user.role !== 'super_admin') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have permission to view this prescription',
+      });
+    }
+
+    res.json({ data: prescription });
+  } catch (error) {
+    console.error('Fetch prescription error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch prescription',
+      message: error.message,
+    });
+  }
+});
+
+
+
+router.put(
+  '/prescriptions/:prescriptionId/status',
   authenticate,
-  canAccessPatient,
-  param('patientId').isMongoId(),
-  validate,
+  [
+    body('status').isIn(['active', 'completed', 'cancelled']),
+    validate,
+  ],
   async (req, res) => {
     try {
-      const query = { patientId: req.params.patientId };
-      
-      if (req.query.active === 'true') {
-        query.isActive = true;
+      const { prescriptionId } = req.params;
+      const { status, reason } = req.body;
+
+      const prescription = await Prescription.findById(prescriptionId);
+
+      if (!prescription) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Prescription not found',
+        });
       }
 
-      const prescriptions = await Prescription.find(query)
-        .populate('doctorId', 'firstName lastName specialization')
-        .sort({ prescribedDate: -1 })
-        .limit(100);
+      // Check permissions
+      const isDoctor = prescription.doctorId.toString() === req.userId.toString();
+      const isPharmacist = req.user.role === 'department_staff' && 
+                           req.user.departmentRole === 'pharmacist' &&
+                           prescription.hospitalId.toString() === req.hospitalId.toString();
 
-      await logAudit(req.user._id, 'READ', 'prescriptions', req.params.patientId, req);
+      if (!isDoctor && !isPharmacist && req.user.role !== 'hospital_admin') {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Insufficient permissions',
+        });
+      }
 
-      res.json(prescriptions);
+      prescription.status = status;
+      if (status === 'cancelled' && reason) {
+        prescription.notes = (prescription.notes || '') + `\nCancelled: ${reason}`;
+      }
+
+      await prescription.save();
+
+      await logAudit(req.userId, 'UPDATE', 'Prescription', prescriptionId, {
+        status,
+        reason,
+      });
+
+      res.json({
+        message: 'Prescription status updated',
+        data: prescription,
+      });
     } catch (error) {
-      console.error('Get prescriptions error:', error);
-      res.status(500).json({ error: 'Failed to get prescriptions' });
+      console.error('Update prescription status error:', error);
+      res.status(500).json({
+        error: 'Update failed',
+        message: error.message,
+      });
     }
   }
 );
+
+
+
+
+/**
+ * @route   POST /api/prescriptions/:prescriptionId/refill
+ * @desc    Request prescription refill
+ * @access  Patient (own prescriptions)
+ */
+router.post(
+  '/prescriptions/:prescriptionId/refill',
+  authenticate,
+  async (req, res) => {
+    try {
+      const { prescriptionId } = req.params;
+
+      const prescription = await Prescription.findById(prescriptionId)
+        .populate('doctorId', 'firstName lastName email')
+        .populate('patientId', 'firstName lastName email');
+
+      if (!prescription) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: 'Prescription not found',
+        });
+      }
+
+      // Only patient can request refill
+      if (req.user.role !== 'patient' || 
+          prescription.patientId._id.toString() !== req.userId.toString()) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'You can only request refills for your own prescriptions',
+        });
+      }
+
+      // Check if refillable
+      if (!prescription.refillable) {
+        return res.status(400).json({
+          error: 'Not Refillable',
+          message: 'This prescription is not refillable',
+        });
+      }
+
+      // Check remaining refills
+      if (prescription.refillsRemaining <= 0) {
+        return res.status(400).json({
+          error: 'No Refills',
+          message: 'No refills remaining. Please contact your doctor.',
+        });
+      }
+
+      // Decrease refills remaining
+      prescription.refillsRemaining -= 1;
+      prescription.lastRefillDate = new Date();
+      await prescription.save();
+
+      // TODO: Send notification to doctor
+      // TODO: Send notification to pharmacy
+
+      res.json({
+        message: 'Refill request submitted successfully',
+        data: prescription,
+      });
+    } catch (error) {
+      console.error('Refill request error:', error);
+      res.status(500).json({
+        error: 'Refill request failed',
+        message: error.message,
+      });
+    }
+  }
+);
+
+
 
 /**
  * UPDATE PRESCRIPTION STATUS
@@ -1323,7 +2183,91 @@ router.get('/patients/search',
   }
 );
 
+// ============================================
+// USER PROFILE
+// ============================================
 
+/**
+ * @route   GET /api/users/profile
+ * @desc    Get current user profile
+ * @access  Authenticated
+ */
+router.get('/users/profile', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId)
+      .populate('hospitalId', 'name email phone address logo')
+      .populate('departmentId', 'name code type')
+      .select('-password');
+
+    res.json({ data: user });
+  } catch (error) {
+    console.error('Fetch profile error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch profile',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * @route   PUT /api/users/profile
+ * @desc    Update current user profile
+ * @access  Authenticated
+ */
+router.put(
+  '/users/profile',
+  authenticate,
+  [
+    body('firstName').optional().trim().notEmpty(),
+    body('lastName').optional().trim().notEmpty(),
+    body('phone').optional().trim(),
+    body('dateOfBirth').optional().isISO8601(),
+    validate,
+  ],
+  async (req, res) => {
+    try {
+      const allowedUpdates = [
+        'firstName',
+        'lastName',
+        'phone',
+        'dateOfBirth',
+        'gender',
+        'address',
+        'emergencyContact',
+        'bloodType',
+        'allergies',
+        'chronicConditions',
+      ];
+
+      const updates = {};
+      allowedUpdates.forEach((field) => {
+        if (req.body[field] !== undefined) {
+          updates[field] = req.body[field];
+        }
+      });
+
+      const user = await User.findByIdAndUpdate(
+        req.userId,
+        { $set: updates },
+        { new: true, runValidators: true }
+      )
+        .populate('hospitalId', 'name email')
+        .populate('departmentId', 'name code')
+        .select('-password');
+
+      res.json({
+        message: 'Profile updated successfully',
+        data: user,
+      });
+    } catch (error) {
+      console.error('Update profile error:', error);
+      res.status(500).json({
+        error: 'Update failed',
+        message: error.message,
+      });
+    }
+  }
+);
 
 
 

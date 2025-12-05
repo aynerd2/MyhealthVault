@@ -15,7 +15,7 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Password is required'],
     minlength: [8, 'Password must be at least 8 characters'],
-    select: false // Don't return password by default
+    select: false 
   },
   firstName: {
     type: String,
@@ -29,10 +29,44 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['patient', 'doctor', 'nurse', 'admin', 'pending_approval'],
+    enum: [
+      'super_admin',      // Platform level (approves hospitals)
+      'hospital_admin',   // Hospital level (approves workers)
+      'doctor',
+      'nurse',
+      'department_staff', // NEW: Lab techs, radiologists, etc.
+      'patient',
+      'pending_approval'
+    ],
     default: 'patient',
-    required: true
+    required: true,
+    index: true,
   },
+
+
+ hospitalId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Hospital',
+    index: true
+  },
+
+ departmentId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Department',
+    index: true
+  },
+  
+  // NEW: Department Role (for department staff)
+  departmentRole: {
+    type: String,
+    enum: ['lab_technician', 'radiologist', 'pharmacist', 'receptionist', 'other']
+  },
+  
+
+
+
+
+
   approvalStatus: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
@@ -72,6 +106,8 @@ const userSchema = new mongoose.Schema({
   address: String,
   emergencyContact: String,
 
+
+
   // Healthcare worker fields
   licenseNumber: {
     type: String,
@@ -85,12 +121,15 @@ const userSchema = new mongoose.Schema({
       return ['doctor', 'nurse', 'pending_approval'].includes(this.role);
     }
   },
-  hospitalAffiliation: {
-    type: String,
-    required: function() {
-      return ['doctor', 'nurse', 'pending_approval'].includes(this.role);
-    }
-  },
+
+
+  // hospitalAffiliation: {
+  //   type: String,
+  //   required: function() {
+  //     return ['doctor', 'nurse', 'pending_approval'].includes(this.role);
+  //   }
+  // },
+  
   licenseVerificationDoc: String,
   verificationNotes: String,
 
@@ -133,6 +172,9 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ email: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ approvalStatus: 1 });
+userSchema.index({ hospitalId: 1, role: 1 });
+userSchema.index({ departmentId: 1, role: 1 });
+userSchema.index({ hospitalId: 1, departmentId: 1 });
 
 // Virtual for account locked
 userSchema.virtual('isLocked').get(function() {
@@ -145,6 +187,12 @@ userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
 
   try {
+    // Check if password is already hashed (bcrypt hashes start with $2)
+    if (this.password && this.password.startsWith('$2')) {
+      // Already hashed, skip
+      return next();
+    }
+
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
     next();
@@ -171,6 +219,8 @@ userSchema.methods.incLoginAttempts = async function() {
       $unset: { lockUntil: 1 }
     });
   }
+
+
 
   // Otherwise increment
   const updates = { $inc: { loginAttempts: 1 } };
@@ -237,6 +287,44 @@ userSchema.methods.toJSON = function() {
   delete user.lockUntil;
   return user;
 };
+
+
+
+
+
+
+
+// NEW: Instance method to check if user belongs to hospital
+userSchema.methods.belongsToHospital = function (hospitalId) {
+  return this.hospitalId && this.hospitalId.toString() === hospitalId.toString();
+};
+
+// NEW: Instance method to check if user can access patient records
+userSchema.methods.canAccessPatientRecords = function (patientHospitalId) {
+  // Super admin can access all
+  if (this.role === 'super_admin') return true;
+  
+  // Hospital admin, doctors, nurses can access their hospital's patients
+  if (['hospital_admin', 'doctor', 'nurse'].includes(this.role)) {
+    return this.belongsToHospital(patientHospitalId);
+  }
+  
+  // Department staff can only access via test orders
+  return false;
+};
+
+// NEW: Static method to find by hospital
+userSchema.statics.findByHospital = function (hospitalId, role) {
+  const query = { hospitalId, isActive: true };
+  if (role) query.role = role;
+  return this.find(query);
+};
+
+
+
+
+
+
 
 const User = mongoose.model('User', userSchema);
 

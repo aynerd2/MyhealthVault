@@ -1,86 +1,277 @@
 
 // backend/src/middleware/auth.js
+const jwt = require('jsonwebtoken');
 const { verifyAccessToken } = require('../utils/jwt.js');
-const User = require('../models/User.model.js');
+const {User, Hospital, Department, HospitalSharing } = require('../models/index.js');
+
+
+
+
 
 /**
  * Main authentication middleware
  * Verifies JWT token and attaches user to request
  */
+
 const authenticate = async (req, res, next) => {
   try {
-    // Get token from header
     const authHeader = req.headers.authorization;
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('❌ No auth header');
       return res.status(401).json({
         error: 'Unauthorized',
         message: 'No token provided'
       });
     }
 
-    const token = authHeader.substring(7); // Remove 'Bearer '
-
-    // Verify token
+    const token = authHeader.split(' ')[1];
+    
     let decoded;
     try {
-      decoded = verifyAccessToken(token);
-    } catch (error) {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      console.log('✅ Token decoded:', decoded.userId);
+    } catch (err) {
+      console.error('❌ Token verification failed:', err.message);
       return res.status(401).json({
         error: 'Unauthorized',
-        message: error.message
+        message: 'Invalid or expired token'
       });
     }
 
-    // Get user from database
-    const user = await User.findById(decoded.userId).select('+password');
+    const user = await User.findById(decoded.userId)
+      .populate('hospitalId', 'name approvalStatus subscriptionStatus')
+      .populate('departmentId', 'name code');
     
-    if (!user) {
-      return res.status(404).json({
-        error: 'User not found',
-        message: 'Please register or login again'
+    console.log('👤 User found:', user?.email);
+    console.log('🏥 Hospital:', user?.hospitalId?.name || 'none');
+    
+    if (!user || !user.isActive) {
+      console.log('❌ User not found or inactive');
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'User not found or inactive'
       });
     }
 
-    // Check if user is active
-    if (!user.isActive) {
-      return res.status(403).json({
-        error: 'Account disabled',
-        message: 'Your account has been disabled. Contact support.'
-      });
+    // Check hospital status for non-super admins
+    if (user.role !== 'super_admin' && user.hospitalId) {
+      console.log('🔍 Checking hospital status...');
+      console.log('   Approval:', user.hospitalId.approvalStatus);
+      console.log('   Subscription:', user.hospitalId.subscriptionStatus);
+      
+      if (user.hospitalId.approvalStatus !== 'approved') {
+        console.log('❌ Hospital not approved');
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Your hospital is not approved yet'
+        });
+      }
+      
+      if (user.hospitalId.subscriptionStatus !== 'active') {
+        console.log('❌ Subscription not active');
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Hospital subscription is not active'
+        });
+      }
+      
+      console.log('✅ Hospital checks passed');
     }
 
-    // Check if account is locked
-    if (user.isLocked) {
-      return res.status(403).json({
-        error: 'Account locked',
-        message: 'Too many failed login attempts. Try again later.'
-      });
-    }
-
-    // Check if pending approval
-    if (user.role === 'pending_approval') {
-      return res.status(403).json({
-        error: 'Account pending approval',
-        message: 'Your account is awaiting admin verification',
-        status: 'pending_approval'
-      });
-    }
-
-    // Attach user to request
     req.user = user;
-    req.userId = user._id;
-    req.userRole = user.role;
-
+    req.userId = decoded.userId;
+    req.hospitalId = user.hospitalId?._id;
+    req.departmentId = user.departmentId?._id;
+    
+    console.log('✅ Auth middleware passed\n');
     next();
   } catch (error) {
-    console.error('Authentication error:', error);
-    return res.status(500).json({
-      error: 'Server error',
+    console.error('❌ Authentication error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
       message: 'Authentication failed'
     });
   }
 };
+
+
+
+
+
+
+// NEW: Require Super Admin
+const requireSuperAdmin = (req, res, next) => {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Super admin access required'
+    });
+  }
+  next();
+};
+
+
+// NEW: Require Hospital Admin
+const requireHospitalAdmin = (req, res, next) => {
+  if (!['super_admin', 'hospital_admin'].includes(req.user.role)) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Hospital admin access required'
+    });
+  }
+  next();
+};
+
+// NEW: Require Healthcare Worker (Doctor or Nurse)
+const requireHealthcareWorker = (req, res, next) => {
+  if (!['super_admin', 'hospital_admin', 'doctor', 'nurse'].includes(req.user.role)) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Healthcare worker access required'
+    });
+  }
+  next();
+};
+
+// NEW: Require Department Staff
+const requireDepartmentStaff = (req, res, next) => {
+  if (!['super_admin', 'hospital_admin', 'department_staff'].includes(req.user.role)) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Department staff access required'
+    });
+  }
+  next();
+};
+
+// NEW: Require Same Hospital
+const requireSameHospital = (hospitalIdParam) => {
+  return (req, res, next) => {
+    // Super admin can access all
+    if (req.user.role === 'super_admin') {
+      return next();
+    }
+
+    const requestedHospitalId = req.params[hospitalIdParam] || req.body[hospitalIdParam];
+    
+    if (!requestedHospitalId) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Hospital ID is required'
+      });
+    }
+
+    if (req.hospitalId.toString() !== requestedHospitalId.toString()) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You can only access your own hospital data'
+      });
+    }
+
+    next();
+  };
+};
+
+// NEW: Require Same Department
+const requireSameDepartment = (departmentIdParam) => {
+  return (req, res, next) => {
+    // Super admin and hospital admin can access all departments
+    if (['super_admin', 'hospital_admin'].includes(req.user.role)) {
+      return next();
+    }
+
+    const requestedDepartmentId = req.params[departmentIdParam] || req.body[departmentIdParam];
+    
+    if (!requestedDepartmentId) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Department ID is required'
+      });
+    }
+
+    if (!req.departmentId || req.departmentId.toString() !== requestedDepartmentId.toString()) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You can only access your own department data'
+      });
+    }
+
+    next();
+  };
+};
+
+// NEW: Can Access Patient (checks if user can access patient's data)
+const canAccessPatient = async (req, res, next) => {
+  try {
+    const patientId = req.params.patientId || req.body.patientId;
+    
+    if (!patientId) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Patient ID is required'
+      });
+    }
+
+    const patient = await User.findById(patientId);
+    
+    if (!patient || patient.role !== 'patient') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Patient not found'
+      });
+    }
+
+    // Super admin can access all
+    if (req.user.role === 'super_admin') {
+      req.patient = patient;
+      return next();
+    }
+
+    // Patients can access their own data
+    if (req.user.role === 'patient' && req.userId.toString() === patientId.toString()) {
+      req.patient = patient;
+      return next();
+    }
+
+    // Healthcare workers can access patients in their hospital
+    if (['hospital_admin', 'doctor', 'nurse'].includes(req.user.role)) {
+      if (req.hospitalId.toString() === patient.hospitalId.toString()) {
+        req.patient = patient;
+        return next();
+      }
+      
+      // Check if cross-hospital sharing is enabled
+      const HospitalSharing = require('../models/HospitalSharing');
+      const canAccess = await HospitalSharing.canAccess(req.hospitalId, patient.hospitalId);
+      
+      if (canAccess) {
+        req.patient = patient;
+        return next();
+      }
+    }
+
+    // Department staff can only access via test orders
+    if (req.user.role === 'department_staff') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Department staff cannot directly access patient records'
+      });
+    }
+
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'You do not have permission to access this patient data'
+    });
+  } catch (error) {
+    console.error('Patient access check error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to check patient access'
+    });
+  }
+};
+
 
 /**
  * Optional authentication
@@ -134,26 +325,6 @@ const requireRole = (...roles) => {
   };
 };
 
-/**
- * Require healthcare worker (doctor or nurse)
- */
-const requireHealthcareWorker = (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({
-      error: 'Unauthorized',
-      message: 'Authentication required'
-    });
-  }
-
-  if (!['doctor', 'nurse', 'admin'].includes(req.user.role)) {
-    return res.status(403).json({
-      error: 'Forbidden',
-      message: 'Access denied. Healthcare worker access required.'
-    });
-  }
-
-  next();
-};
 
 /**
  * Require patient role
@@ -176,34 +347,6 @@ const requirePatient = (req, res, next) => {
   next();
 };
 
-/**
- * Check if user can access patient data
- */
-const canAccessPatient = (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({
-      error: 'Unauthorized',
-      message: 'Authentication required'
-    });
-  }
-
-  const patientId = req.params.patientId || req.body.patientId;
-
-  // Healthcare workers and admins can access any patient
-  if (['doctor', 'nurse', 'admin'].includes(req.user.role)) {
-    return next();
-  }
-
-  // Patients can only access their own data
-  if (req.user.role === 'patient' && req.user._id.toString() === patientId) {
-    return next();
-  }
-
-  return res.status(403).json({
-    error: 'Forbidden',
-    message: 'Access denied to this patient record'
-  });
-};
 
 /**
  * Check if user can modify patient data
@@ -256,7 +399,14 @@ module.exports = {
   requirePatient,
   canAccessPatient,
   canModifyPatientData,
-  requireEmailVerified
+  requireEmailVerified,
+  requireSuperAdmin,
+  requireHospitalAdmin,
+  requireHealthcareWorker,
+  requireDepartmentStaff,
+  requireSameHospital,
+  requireSameDepartment,
+
 };
 
 

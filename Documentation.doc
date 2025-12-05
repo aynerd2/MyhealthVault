@@ -1,0 +1,154 @@
+Platform Level (Super Admin)
+├── Hospitals (multiple, isolated)
+│   ├── Hospital A
+│   │   ├── Departments
+│   │   │   ├── Radiology
+│   │   │   ├── Laboratory
+│   │   │   └── Cardiology
+│   │   ├── Hospital Admin
+│   │   ├── Doctors (per department)
+│   │   ├── Nurses (per department)
+│   │   └── Patients (per hospital)
+│   └── Hospital B
+│       └── (same structure)
+└── Cross-Hospital Record Sharing (approved only)
+
+
+
+## 🔄 Updated User Roles & Permissions
+
+### **New Role Hierarchy:**
+```
+Platform Level:
+└── super_admin (Platform Owner)
+    └── Approves hospitals
+    └── Approves cross-hospital sharing
+    └── System-wide access
+
+Hospital Level:
+└── hospital_admin (Hospital Owner)
+    ├── Approves doctors, nurses, staff
+    ├── Manages departments
+    └── Hospital-wide access
+
+Department Level:
+├── doctor
+│   ├── Can view all patient records in their hospital
+│   ├── Can create medical records
+│   ├── Can order tests (any department)
+│   └── Can view test results (after payment)
+│
+├── nurse
+│   ├── Can view patient records (limited)
+│   ├── Can update vital signs
+│   └── Cannot order tests
+│
+└── department_staff (Lab Tech, Radiologist, etc.)
+    ├── Can ONLY see test orders sent to their department
+    ├── Can see payment status indicator
+    ├── Can upload results ONLY after payment
+    └── Cannot see other departments' data
+
+Patient Level:
+└── patient
+    ├── Can view ALL their records from ALL hospitals
+    ├── Can see test orders and payment status
+    ├── Can download results
+    └── Cross-hospital view (automatic)
+```
+
+---
+
+## 🔐 Permission Matrix
+
+| Action | Super Admin | Hospital Admin | Doctor | Nurse | Dept Staff | Patient |
+|--------|-------------|----------------|--------|-------|------------|---------|
+| **Approve Hospital** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Approve Cross-Hospital Sharing** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Approve Staff** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Create Department** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **View All Hospital Records** | ✅ | ✅ | ✅ | ⚠️ Limited | ❌ | ❌ |
+| **Create Medical Record** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Order Test** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **See Test Orders (Own Dept Only)** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **See Payment Status** | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **Upload Test Result (After Payment)** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **View Own Records (All Hospitals)** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+
+
+## 🔄 New Workflows
+
+### **Workflow 1: Hospital Registration**
+```
+1. Hospital fills registration form
+   ├── Name, address, registration number
+   ├── Admin user details
+   └── Subscription plan
+
+2. Super Admin receives notification
+
+3. Super Admin reviews and approves/rejects
+   └── If approved: Hospital becomes active
+
+4. Hospital Admin can now:
+   ├── Create departments
+   ├── Invite staff
+   └── Manage settings
+```
+
+---
+
+### **Workflow 2: Test Order with Payment**
+```
+1. Doctor examines patient
+   └── Creates medical record
+
+2. Doctor orders test
+   ├── Selects department (e.g., Radiology)
+   ├── Specifies test type (e.g., X-Ray)
+   └── Test order created with status: "payment_pending"
+
+3. Patient sees test order
+   ├── Status: "Payment Required"
+   ├── Amount: $150
+   └── Payment button visible
+
+4. Patient makes payment
+   ├── Payment gateway processes
+   └── Test order updated: paymentStatus = "paid"
+
+5. Department staff sees order
+   ├── ✅ Green indicator: "Payment Confirmed"
+   ├── Can now upload results
+   └── Upload button enabled
+
+6. Department uploads test result
+   ├── Upload PDF/Image
+   ├── Add notes
+   └── Test order status: "completed"
+
+7. Doctor receives notification
+   └── Can view result
+
+8. Patient can view/download result
+```
+
+---
+
+### **Workflow 3: Cross-Hospital Record Sharing**
+```
+1. Hospital A wants to view Hospital B's records
+
+2. Hospital A sends sharing request
+   └── Via super admin approval system
+
+3. Super Admin reviews
+   ├── Checks subscription status
+   ├── Verifies compliance
+   └── Approves/denies
+
+4. If approved:
+   ├── Hospital A doctors can see Hospital B records
+   ├── Only for patients who visited both hospitals
+   └── Audit log tracks all access

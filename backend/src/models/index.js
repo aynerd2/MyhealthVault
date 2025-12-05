@@ -1,5 +1,9 @@
 const mongoose = require('mongoose');
 const User = require('./User.model.js');
+const Hospital = require('./Hospital.js'); 
+const Department = require('./Department.js'); 
+const TestOrder = require('./TestOrder.js'); 
+const HospitalSharing = require('./HospitalSharing.js'); 
 
 
 
@@ -308,10 +312,16 @@ const Prescription = mongoose.model('Prescription', PrescriptionSchema);
 const TestResult = mongoose.model('TestResult', TestResultSchema);
 const AuditLog = mongoose.model('AuditLog', AuditLogSchema);
 
+
+
 module.exports = {
   User,
   MedicalRecord,
   Prescription,
   TestResult,
   AuditLog,
+  Hospital,        
+  Department,      
+  TestOrder,      
+  HospitalSharing,
 };
