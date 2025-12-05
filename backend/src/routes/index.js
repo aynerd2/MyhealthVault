@@ -34,7 +34,7 @@ const hospitalRoutes = require('./hospital.routes.js');
 const departmentRoutes = require('./department.routes.js');
 const testOrderRoutes = require('./testOrder.routes.js');
 const hospitalSharingRoutes = require('./hospitalSharing.routes.js');
-
+const patientRoutes = require('./patient.routes.js')
 
 
 
@@ -75,7 +75,7 @@ router.use('/test-orders', testOrderRoutes);
 // Hospital sharing routes
 router.use('/hospital-sharing', hospitalSharingRoutes);
 
-
+router.use('/patients', patientRoutes);
 
 
 
@@ -732,101 +732,6 @@ router.patch('/users/me',
     }
   }
 );
-
-// ==================== PATIENT SEARCH (Healthcare Workers Only) ====================
-
-/**
- * SEARCH PATIENTS
- * GET /api/patients/search?q=john
- * Only healthcare workers can search
- */
-// router.get('/patients/search',
-//   authenticate,
-//   requireHealthcareWorker,
-//   query('q').notEmpty(),
-//   validate,
-//   async (req, res) => {
-//     try {
-//       const searchQuery = req.query.q;
-      
-//       const patients = await User.find({
-//         role: 'patient',
-//         $or: [
-//           { firstName: new RegExp(searchQuery, 'i') },
-//           { lastName: new RegExp(searchQuery, 'i') },
-//           { email: new RegExp(searchQuery, 'i') },
-//         ],
-//       })
-//       .select('firstName lastName email dateOfBirth gender bloodType')
-//       .limit(20);
-
-//       res.json(patients);
-//     } catch (error) {
-//       console.error('Search patients error:', error);
-//       res.status(500).json({ error: 'Search failed' });
-//     }
-//   }
-// );
-
-router.get('/patients/search', authenticate, requireHealthcareWorker, async (req, res) => {
-  try {
-    const { q } = req.query;
-
-    if (!q || q.trim().length < 2) {
-      return res.status(400).json({
-        error: 'Invalid Query',
-        message: 'Search query must be at least 2 characters',
-      });
-    }
-
-    // Build query for accessible hospitals
-    const accessibleHospitals = [req.hospitalId];
-
-    // Add shared hospitals
-    const sharings = await HospitalSharing.find({
-      requestingHospitalId: req.hospitalId,
-      status: 'approved',
-      isActive: true,
-    });
-
-    sharings.forEach((sharing) => {
-      if (!sharing.isExpired) {
-        accessibleHospitals.push(sharing.targetHospitalId);
-      }
-    });
-
-    const searchQuery = {
-      role: 'patient',
-      hospitalId: { $in: accessibleHospitals },
-      $or: [
-        { firstName: { $regex: q, $options: 'i' } },
-        { lastName: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
-      ],
-    };
-
-    const patients = await User.find(searchQuery)
-      .populate('hospitalId', 'name')
-      .select('-password')
-      .limit(20);
-
-    res.json({
-      count: patients.length,
-      data: patients,
-    });
-  } catch (error) {
-    console.error('Patient search error:', error);
-    res.status(500).json({
-      error: 'Search failed',
-      message: error.message,
-    });
-  }
-});
-
-
-
-
-
 
 
 
@@ -2143,45 +2048,6 @@ router.get('/audit-logs',
 
 
 
-
-
-
-
-// ==================== PATIENTS SEARCH ROUTE ====================
-
-/**
- * SEARCH PATIENTS
- * GET /api/patients/search?q=query
- */
-router.get('/patients/search',
-  authenticate,
-  requireHealthcareWorker,
-  async (req, res) => {
-    try {
-      const query = req.query.q;
-
-      if (!query || query.length < 2) {
-        return res.json([]);
-      }
-
-      const patients = await User.find({
-        role: 'patient',
-        $or: [
-          { firstName: { $regex: query, $options: 'i' } },
-          { lastName: { $regex: query, $options: 'i' } },
-          { email: { $regex: query, $options: 'i' } },
-        ],
-      })
-        .select('firstName lastName email dateOfBirth bloodType phone')
-        .limit(20);
-
-      res.json(patients);
-    } catch (error) {
-      console.error('Search patients error:', error);
-      res.status(500).json({ error: 'Failed to search patients' });
-    }
-  }
-);
 
 // ============================================
 // USER PROFILE
